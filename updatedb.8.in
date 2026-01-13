@@ -94,9 +94,9 @@ Write the database to
 instead of using the default database.
 
 .TP
-\fB\-\-configfile\fR \fIFILE\fR
+\fB\-\-config-file\fR \fIFILE\fR
 Read configuration from \fIFILE\fR instead of the default configuration file.
-Command-line options still override settings from the configuration file.
+Command-line options still override settings from the file.
 
 See
 .BR updatedb.conf (5)

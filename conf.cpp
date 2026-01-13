@@ -343,7 +343,7 @@ help(void)
 	         "                                 `%s')\n"
 	         "  -b, --block-size SIZE          number of filenames to store\n"
 	         "                                 in each block (default 32)\n"
-	         "      --configfile FILE          configuration file (default `%s')\n"
+	         "      --config-file FILE         configuration file (default `%s')\n"
 	         "      --prune-bind-mounts FLAG   omit bind mounts (default "
 	         "\"no\")\n"
 	         "      --prunefs FS               filesystems to omit from "
@@ -359,7 +359,7 @@ help(void)
 	         "  -V, --version                  print version information\n"
 	         "\n"
 	         "The configuration defaults to values read from `%s',\n"
-	         "or from a file specified with --configfile.\n",
+	         "or from a file specified with --config-file.\n",
 	       DBFILE, UPDATEDB_CONF, UPDATEDB_CONF);
 	printf("\n"
 	       "Report bugs to %s.\n",
@@ -389,14 +389,14 @@ prepend_cwd(const string &path)
 /* Command line options definitions, shared by parse_initial_arguments and parse_arguments */
 enum { OPT_DEBUG_PRUNING = CHAR_MAX + 1,
        OPT_ADD_SINGLE_PRUNEPATH = CHAR_MAX + 2,
-       OPT_CONFIGFILE = CHAR_MAX + 3 };
+       OPT_CONFIG_FILE = CHAR_MAX + 3 };
 
 static const struct option options[] = {
 	{ "add-prunefs", required_argument, NULL, 'f' },
 	{ "add-prunenames", required_argument, NULL, 'n' },
 	{ "add-prunepaths", required_argument, NULL, 'e' },
 	{ "add-single-prunepath", required_argument, NULL, OPT_ADD_SINGLE_PRUNEPATH },
-	{ "configfile", required_argument, NULL, OPT_CONFIGFILE },
+	{ "config-file", required_argument, NULL, OPT_CONFIG_FILE },
 	{ "database-root", required_argument, NULL, 'U' },
 	{ "debug-pruning", no_argument, NULL, OPT_DEBUG_PRUNING },
 	{ "help", no_argument, NULL, 'h' },
@@ -429,10 +429,10 @@ parse_initial_arguments(int argc, char *argv[])
 			case '?':
 				exit(EXIT_FAILURE);
 
-			case OPT_CONFIGFILE:
+			case OPT_CONFIG_FILE:
 				if (conf_config_file != NULL) {
 					fprintf(stderr, "%s: --%s specified twice\n",
-					        program_invocation_name, "configfile");
+					        program_invocation_name, "config-file");
 					exit(EXIT_FAILURE);
 				}
 				conf_config_file = optarg;
@@ -609,7 +609,7 @@ parse_arguments(int argc, char *argv[])
 			conf_debug_pruning = true;
 			break;
 
-		case OPT_CONFIGFILE:
+		case OPT_CONFIG_FILE:
 			break; // Was handled in parse_initial_arguments
 
 		default:
