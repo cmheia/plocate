@@ -68,6 +68,9 @@ bool conf_verbose; /* = false; */
 /* Configuration representation for the database configuration block */
 string conf_block;
 
+/* Custom configuration file path, or NULL to use default */
+const char *conf_config_file = NULL;
+
 int conf_block_size = 32;
 bool use_debug = false;
 
@@ -117,10 +120,12 @@ var_finish(vector<string> *list)
 	list->erase(new_end, list->end());
 }
 
-/* UPDATEDB_CONF parsing */
+/* Configuration file parsing */
 
-/* UPDATEDB_CONF (locked) */
+/* Configuration file (locked) */
 static FILE *uc_file;
+/* Configuration file path */
+static const char *uc_file_path;
 /* Line number at token start; type matches error_at_line () */
 static unsigned uc_line;
 /* Current line number; type matches error_at_line () */
@@ -175,7 +180,7 @@ uc_lex(void)
 		while ((c = getc_unlocked(uc_file)) != '"') {
 			if (c == EOF || c == '\n') {
 				fprintf(stderr, "%s:%u: missing closing `\"'\n",
-					UPDATEDB_CONF, uc_line);
+					uc_file_path, uc_line);
 				exit(EXIT_FAILURE);
 			}
 			uc_lex_buf.push_back(c);
@@ -204,18 +209,19 @@ uc_lex(void)
 	}
 }
 
-/* Parse /etc/updatedb.conf.  Exit on I/O or syntax error. */
+/* Parse configuration file.  Exit on I/O or syntax error. */
 static void
 parse_updatedb_conf(void)
 {
 	bool had_prune_bind_mounts, had_prunefs, had_prunenames, had_prunepaths;
 
-	uc_file = fopen(UPDATEDB_CONF, "r");
+	uc_file_path = conf_config_file ? conf_config_file : UPDATEDB_CONF;
+	uc_file = fopen(uc_file_path, "r");
 	if (uc_file == NULL) {
-	        if (errno != ENOENT) {
-		        perror(UPDATEDB_CONF);
+		if (errno != ENOENT || conf_config_file != NULL) {
+			perror(uc_file_path);
 			exit(EXIT_FAILURE);
-	        }
+		}
 		return;
 	}
 	flockfile(uc_file);
@@ -254,17 +260,17 @@ parse_updatedb_conf(void)
 
 		case UCT_IDENTIFIER:
 			fprintf(stderr, "%s:%u: unknown variable: `%s'\n",
-				UPDATEDB_CONF, uc_line, uc_lex_buf.c_str());
+				uc_file_path, uc_line, uc_lex_buf.c_str());
 			exit(EXIT_FAILURE);
 
 		default:
 			fprintf(stderr, "%s:%u: variable name expected\n",
-				UPDATEDB_CONF, uc_line);
+				uc_file_path, uc_line);
 			exit(EXIT_FAILURE);
 		}
 		if (*had_var != false) {
 			fprintf(stderr, "%s:%u: variable `%s' was already defined\n",
-				UPDATEDB_CONF, uc_line, uc_lex_buf.c_str());
+				uc_file_path, uc_line, uc_lex_buf.c_str());
 			exit(EXIT_FAILURE);
 		}
 		*had_var = true;
@@ -272,19 +278,19 @@ parse_updatedb_conf(void)
 		token = uc_lex();
 		if (token != UCT_EQUAL) {
 			fprintf(stderr, "%s:%u: `=' expected after variable name\n",
-				UPDATEDB_CONF, uc_line);
+				uc_file_path, uc_line);
 			exit(EXIT_FAILURE);
 		}
 		token = uc_lex();
 		if (token != UCT_QUOTED) {
 			fprintf(stderr, "%s:%u: value in quotes expected after `='\n",
-				UPDATEDB_CONF, uc_line);
+				uc_file_path, uc_line);
 			exit(EXIT_FAILURE);
 		}
 		if (var_token == UCT_PRUNE_BIND_MOUNTS) {
 			if (parse_bool(&conf_prune_bind_mounts, uc_lex_buf.c_str()) != 0) {
 				fprintf(stderr, "%s:%u: invalid value `%s' of PRUNE_BIND_MOUNTS\n",
-					UPDATEDB_CONF, uc_line, uc_lex_buf.c_str());
+					uc_file_path, uc_line, uc_lex_buf.c_str());
 				exit(EXIT_FAILURE);
 			}
 		} else if (var_token == UCT_PRUNEFS)
@@ -298,7 +304,7 @@ parse_updatedb_conf(void)
 		token = uc_lex();
 		if (token != UCT_EOL && token != UCT_EOF) {
 			fprintf(stderr, "%s:%u: unexpected data after variable value\n",
-				UPDATEDB_CONF, uc_line);
+				uc_file_path, uc_line);
 			exit(EXIT_FAILURE);
 		}
 		/* Fall through */
@@ -310,7 +316,7 @@ parse_updatedb_conf(void)
 	}
 eof:
 	if (ferror(uc_file)) {
-		perror(UPDATEDB_CONF);
+		perror(uc_file_path);
 		exit(EXIT_FAILURE);
 	}
 	funlockfile(uc_file);
@@ -337,6 +343,7 @@ help(void)
 	         "                                 `%s')\n"
 	         "  -b, --block-size SIZE          number of filenames to store\n"
 	         "                                 in each block (default 32)\n"
+	         "      --configfile FILE          configuration file (default `%s')\n"
 	         "      --prune-bind-mounts FLAG   omit bind mounts (default "
 	         "\"no\")\n"
 	         "      --prunefs FS               filesystems to omit from "
@@ -351,9 +358,9 @@ help(void)
 	         "are found\n"
 	         "  -V, --version                  print version information\n"
 	         "\n"
-	         "The configuration defaults to values read from\n"
-	         "`%s'.\n",
-	       DBFILE, UPDATEDB_CONF);
+	         "The configuration defaults to values read from `%s',\n"
+	         "or from a file specified with --configfile.\n",
+	       DBFILE, UPDATEDB_CONF, UPDATEDB_CONF);
 	printf("\n"
 	       "Report bugs to %s.\n",
 	       PACKAGE_BUGREPORT);
@@ -379,34 +386,74 @@ prepend_cwd(const string &path)
 	return buf + '/' + path;
 }
 
+/* Command line options definitions, shared by parse_initial_arguments and parse_arguments */
+enum { OPT_DEBUG_PRUNING = CHAR_MAX + 1,
+       OPT_ADD_SINGLE_PRUNEPATH = CHAR_MAX + 2,
+       OPT_CONFIGFILE = CHAR_MAX + 3 };
+
+static const struct option options[] = {
+	{ "add-prunefs", required_argument, NULL, 'f' },
+	{ "add-prunenames", required_argument, NULL, 'n' },
+	{ "add-prunepaths", required_argument, NULL, 'e' },
+	{ "add-single-prunepath", required_argument, NULL, OPT_ADD_SINGLE_PRUNEPATH },
+	{ "configfile", required_argument, NULL, OPT_CONFIGFILE },
+	{ "database-root", required_argument, NULL, 'U' },
+	{ "debug-pruning", no_argument, NULL, OPT_DEBUG_PRUNING },
+	{ "help", no_argument, NULL, 'h' },
+	{ "output", required_argument, NULL, 'o' },
+	{ "prune-bind-mounts", required_argument, NULL, 'B' },
+	{ "prunefs", required_argument, NULL, 'F' },
+	{ "prunenames", required_argument, NULL, 'N' },
+	{ "prunepaths", required_argument, NULL, 'P' },
+	{ "require-visibility", required_argument, NULL, 'l' },
+	{ "verbose", no_argument, NULL, 'v' },
+	{ "version", no_argument, NULL, 'V' },
+	{ "block-size", required_argument, 0, 'b' },
+	{ "debug", no_argument, 0, 'D' },  // Not documented.
+	{ NULL, 0, NULL, 0 }
+};
+
+static auto short_options = "U:Ve:f:hl:n:o:vb:D";
+
+/* Parse ARGC, ARGV for options that need to be processed before config file parsing. */
+static void
+parse_initial_arguments(int argc, char *argv[])
+{
+	for (;;) {
+		int idx;
+		auto opt = getopt_long(argc, argv, short_options, options, &idx);
+		switch (opt) {
+			case -1:
+				goto options_done;
+
+			case '?':
+				exit(EXIT_FAILURE);
+
+			case OPT_CONFIGFILE:
+				if (conf_config_file != NULL) {
+					fprintf(stderr, "%s: --%s specified twice\n",
+					        program_invocation_name, "configfile");
+					exit(EXIT_FAILURE);
+				}
+				conf_config_file = optarg;
+				break;
+
+			default:
+				break; // Ignore other options
+		}
+	}
+options_done:
+	if (optind != argc) {
+		fprintf(stderr, "%s: unexpected operand on command line",
+			program_invocation_name);
+		exit(EXIT_FAILURE);
+	}
+}
+
 /* Parse ARGC, ARGV.  Exit on error or --help, --version. */
 static void
 parse_arguments(int argc, char *argv[])
 {
-	enum { OPT_DEBUG_PRUNING = CHAR_MAX + 1,
-	       OPT_ADD_SINGLE_PRUNEPATH = CHAR_MAX + 2 };
-
-	static const struct option options[] = {
-		{ "add-prunefs", required_argument, NULL, 'f' },
-		{ "add-prunenames", required_argument, NULL, 'n' },
-		{ "add-prunepaths", required_argument, NULL, 'e' },
-		{ "add-single-prunepath", required_argument, NULL, OPT_ADD_SINGLE_PRUNEPATH },
-		{ "database-root", required_argument, NULL, 'U' },
-		{ "debug-pruning", no_argument, NULL, OPT_DEBUG_PRUNING },
-		{ "help", no_argument, NULL, 'h' },
-		{ "output", required_argument, NULL, 'o' },
-		{ "prune-bind-mounts", required_argument, NULL, 'B' },
-		{ "prunefs", required_argument, NULL, 'F' },
-		{ "prunenames", required_argument, NULL, 'N' },
-		{ "prunepaths", required_argument, NULL, 'P' },
-		{ "require-visibility", required_argument, NULL, 'l' },
-		{ "verbose", no_argument, NULL, 'v' },
-		{ "version", no_argument, NULL, 'V' },
-		{ "block-size", required_argument, 0, 'b' },
-		{ "debug", no_argument, 0, 'D' },  // Not documented.
-		{ NULL, 0, NULL, 0 }
-	};
-
 	bool prunefs_changed, prunenames_changed, prunepaths_changed;
 	bool got_prune_bind_mounts, got_visibility;
 
@@ -415,10 +462,12 @@ parse_arguments(int argc, char *argv[])
 	prunepaths_changed = false;
 	got_prune_bind_mounts = false;
 	got_visibility = false;
+
+	optind = 1; // Reset for second pass
 	for (;;) {
 		int opt, idx;
 
-		opt = getopt_long(argc, argv, "U:Ve:f:hl:n:o:vb:D", options, &idx);
+		opt = getopt_long(argc, argv, short_options, options, &idx);
 		switch (opt) {
 		case -1:
 			goto options_done;
@@ -560,6 +609,9 @@ parse_arguments(int argc, char *argv[])
 			conf_debug_pruning = true;
 			break;
 
+		case OPT_CONFIGFILE:
+			break; // Was handled in parse_initial_arguments
+
 		default:
 			abort();
 		}
@@ -621,6 +673,7 @@ gen_conf_block(void)
    Exit on error or --help, --version. */
 void conf_prepare(int argc, char *argv[])
 {
+	parse_initial_arguments(argc, argv);
 	parse_updatedb_conf();
 	parse_arguments(argc, argv);
 	for (string &str : conf_prunefs) {

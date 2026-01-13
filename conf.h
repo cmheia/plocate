@@ -58,6 +58,9 @@ extern bool conf_verbose;
 /* Configuration representation for the database configuration block */
 extern std::string conf_block;
 
+/* Custom configuration file path, or NULL to use default */
+extern const char *conf_config_file;
+
 /* Parse /etc/updatedb.conf and command-line arguments ARGC, ARGV.
    Exit on error or --help, --version. */
 extern void conf_prepare(int argc, char *argv[]);
