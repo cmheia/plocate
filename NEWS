@@ -1,3 +1,16 @@
+plocate 1.1.24, January 13th, 2026
+
+  - Improve error handling on synchronous reads. Reported by
+    Björn Försterling.
+
+  - Remove ConditionACPower=true from the systemd unit file,
+    to fix an issue where certain charging patterns prevent
+    updatedb from ever running on laptops. Patch by Manfred Schwarb.
+
+  - Add a new option --config-file for changing the path of
+    updatedb.conf. Patch by Yehuda Bernáth.
+
+
 plocate 1.1.23, November 24th, 2024
 
   - Various improvements, in particular to the systemd unit file.
