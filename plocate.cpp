@@ -19,12 +19,14 @@
 #include <functional>
 #include <getopt.h>
 #include <inttypes.h>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <locale.h>
 #include <memory>
 #include <mutex>
 #include <regex.h>
+#include <sstream>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,18 +104,9 @@ Corpus::Corpus(int fd, const char *filename_for_errors, IOUringEngine *engine)
 		fprintf(stderr, "%s: database is corrupt or not a plocate database; please rebuild it.\n", filename_for_errors);
 		exit(1);
 	}
-	if (hdr.version != 0 && hdr.version != 1) {
-		fprintf(stderr, "%s: has version %u, expected 0 or 1; please rebuild it.\n", filename_for_errors, hdr.version);
+	if (hdr.version != 200) {
+		fprintf(stderr, "%s: has version %u, expected 200; please rebuild it.\n", filename_for_errors, hdr.version);
 		exit(1);
-	}
-	if (hdr.version == 0) {
-		// These will be junk data.
-		hdr.zstd_dictionary_offset_bytes = 0;
-		hdr.zstd_dictionary_length_bytes = 0;
-	}
-	if (hdr.max_version < 2) {
-		// This too. (We ignore the other max_version 2 fields.)
-		hdr.check_visibility = true;
 	}
 	if (ignore_visibility) {
 		hdr.check_visibility = false;
@@ -204,28 +197,52 @@ void scan_file_block(const vector<Needle> &needles, string_view compressed,
 	}
 	block[block.size() - 1] = '\0';
 
-	auto test_candidate = [&](const char *filename, uint64_t local_seq, uint64_t next_seq) {
-		access_rx_cache->check_access(filename, /*allow_async=*/true, [matched, engine, serializer, local_seq, next_seq, filename{ strdup(filename) }](bool ok) {
-			stat_if_needed(filename, ok, engine, [matched, serializer, local_seq, next_seq, filename](bool ok) {
-				if (ok) {
-					++*matched;
-					serializer->print(local_seq, next_seq - local_seq, filename);
-				} else {
-					serializer->print(local_seq, next_seq - local_seq, "");
-				}
-				free(filename);
-			});
-		});
+	// 新格式的解析
+	const char *ptr = block.data();
+	const char *end = block.data() + uncompressed_len;
+
+	auto test_candidate = [&](const char *filename, uint64_t size, uint64_t mtime, uint64_t local_seq, uint64_t next_seq) {
+		// 元数据已存储在数据库中，无需访问文件系统检查权限
+		++*matched;
+
+		// 新格式输出：SIZE_ENCODED_HEX(16) + MTIME_HEX(16)|PATH
+		// SIZE_ENCODED 的高8位包含标志位，由 Python 端解析
+		ostringstream oss;
+		oss << hex << setfill('0') << setw(16) << size
+		    << setw(16) << mtime << '|' << filename;
+		serializer->print(local_seq, next_seq - local_seq, oss.str());
 	};
 
 	// We need to know the next sequence number before inserting into Serializer,
 	// so always buffer one candidate.
 	const char *pending_candidate = nullptr;
+	uint64_t pending_size = 0, pending_mtime = 0;
 
 	uint64_t local_seq = seq << 32;
-	for (const char *filename = block.data();
-	     filename != block.data() + block.size();
-	     filename += strlen(filename) + 1) {
+
+	while (ptr < end) {
+		if (ptr + 16 > end) break;
+		// 读取 size (8字节)
+		uint64_t size = 0;
+		for (int i = 0; i < 8; ++i) {
+			size |= (uint64_t)(unsigned char)ptr[i] << (i * 8);
+		}
+		ptr += 8;
+
+		// 读取 mtime (8字节)
+		uint64_t mtime = 0;
+		for (int i = 0; i < 8; ++i) {
+			mtime |= (uint64_t)(unsigned char)ptr[i] << (i * 8);
+		}
+		ptr += 8;
+
+		// 读取路径
+		const char *filename = ptr;
+		while (ptr < end && *ptr != '\0') ++ptr;
+		if (ptr >= end) break;
+		++ptr;  // 跳过 \0
+
+		// 匹配逻辑
 		const char *haystack = filename;
 		if (match_basename) {
 			haystack = strrchr(filename, '/');
@@ -245,16 +262,18 @@ void scan_file_block(const vector<Needle> &needles, string_view compressed,
 		}
 		if (found) {
 			if (pending_candidate != nullptr) {
-				test_candidate(pending_candidate, local_seq, local_seq + 1);
+				test_candidate(pending_candidate, pending_size, pending_mtime, local_seq, local_seq + 1);
 				++local_seq;
 			}
 			pending_candidate = filename;
+			pending_size = size;
+			pending_mtime = mtime;
 		}
 	}
 	if (pending_candidate == nullptr) {
 		serializer->print(seq << 32, 1ULL << 32, "");
 	} else {
-		test_candidate(pending_candidate, local_seq, (seq + 1) << 32);
+		test_candidate(pending_candidate, pending_size, pending_mtime, local_seq, (seq + 1) << 32);
 	}
 }
 
@@ -832,6 +851,7 @@ void version()
 {
 	printf("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
 	printf("Copyright 2020 Steinar H. Gunderson\n");
+	printf("metadata by cmheia 2026\n");
 	printf("License GPLv2+: GNU GPL version 2 or later <https://gnu.org/licenses/gpl.html>.\n");
 	printf("This is free software: you are free to change and redistribute it.\n");
 	printf("There is NO WARRANTY, to the extent permitted by law.\n");

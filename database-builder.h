@@ -36,10 +36,47 @@ struct dir_time {
 constexpr dir_time unknown_dir_time{ 0, 0 };
 constexpr dir_time not_a_dir{ -1, 0 };
 
+struct FileEntry {
+	std::string filename;
+	uint64_t size;      // 文件大小（低56位）+ 标志位（高8位）
+	uint64_t mtime_sec;  // 修改时间（秒）
+	uint32_t mtime_nsec; // 修改时间（纳秒）
+
+	// 标志位常量（高8位）
+	static constexpr uint64_t FLAG_DIR = (1ULL << 63);
+	static constexpr uint64_t FLAG_SYMLINK = (1ULL << 62);
+	static constexpr uint64_t FLAG_HARDLINK = (1ULL << 61);
+	static constexpr uint64_t FLAG_HIDDEN = (1ULL << 60);
+	static constexpr uint64_t FLAG_EXEC = (1ULL << 59);
+	static constexpr uint64_t FLAGS_MASK = 0xFF00000000000000ULL;
+	static constexpr uint64_t SIZE_MASK = 0x00FFFFFFFFFFFFFFULL;
+
+	// 获取真实文件大小（清除标志位）
+	uint64_t get_size() const { return size & SIZE_MASK; }
+
+	// 设置文件大小和标志位
+	void set_size(uint64_t real_size, bool is_dir = false, bool is_symlink = false,
+	              bool is_hardlink = false, bool is_hidden = false, bool is_exec = false) {
+		size = (real_size & SIZE_MASK) |
+		       (is_dir ? FLAG_DIR : 0) |
+		       (is_symlink ? FLAG_SYMLINK : 0) |
+		       (is_hardlink ? FLAG_HARDLINK : 0) |
+		       (is_hidden ? FLAG_HIDDEN : 0) |
+		       (is_exec ? FLAG_EXEC : 0);
+	}
+
+	// 检查标志位
+	bool is_directory() const { return (size & FLAG_DIR) != 0; }
+	bool is_symlink() const { return (size & FLAG_SYMLINK) != 0; }
+	bool is_hardlink() const { return (size & FLAG_HARDLINK) != 0; }
+	bool is_hidden() const { return (size & FLAG_HIDDEN) != 0; }
+	bool is_executable() const { return (size & FLAG_EXEC) != 0; }
+};
+
 class DatabaseReceiver {
 public:
 	virtual ~DatabaseReceiver() = default;
-	virtual void add_file(std::string filename, dir_time dt) = 0;
+	virtual void add_file(const FileEntry& entry) = 0;  // 传入完整的文件元数据
 	virtual void flush_block() = 0;
 	virtual void finish() { flush_block(); }
 
@@ -51,7 +88,7 @@ class DictionaryBuilder : public DatabaseReceiver {
 public:
 	DictionaryBuilder(size_t blocks_to_keep, size_t block_size)
 		: blocks_to_keep(blocks_to_keep), block_size(block_size) {}
-	void add_file(std::string filename, dir_time dt) override;
+	void add_file(const FileEntry& entry) override;
 	void flush_block() override;
 	std::string train(size_t buf_size);
 

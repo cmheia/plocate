@@ -5,7 +5,7 @@
 
 struct Header {
 	char magic[8];  // "\0plocate";
-	uint32_t version;  // 2 is the current version.
+	uint32_t version;  // 200 is the current version (with file metadata).
 	uint32_t hashtable_size;
 	uint32_t extra_ht_slots;
 	uint32_t num_docids;

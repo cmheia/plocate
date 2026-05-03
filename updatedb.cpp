@@ -151,9 +151,17 @@ bool time_is_current(const dir_time &t)
 struct entry {
 	string name;
 	bool is_directory;
+	bool is_symlink = false;
+	bool is_hardlink = false;
+	bool is_hidden = false;
+	bool is_exec = false;
+	uint64_t size = 0;  // 文件大小（用于搜索输出）
 
 	// For directories only:
 	int fd = -1;
+	// For all entries: 存储修改时间（秒），目录还使用 nsec
+	// 非目录：sec 存储 mtime，nsec 不使用
+	// 目录：sec 和 nsec 共同组成完整时间用于增量更新
 	dir_time dt = unknown_dir_time;
 	dir_time db_modified = unknown_dir_time;
 	dev_t dev;
@@ -620,6 +628,7 @@ int scan(const string &path, int fd, dev_t parent_dev, dir_time modified, dir_ti
 
 			entry e;
 			e.name = de->d_name;
+			e.is_hidden = (de->d_name[0] == '.');
 			if (de->d_type == DT_UNKNOWN) {
 				// Evidently some file systems, like older versions of XFS
 				// (mkfs.xfs -m crc=0 -n ftype=0), can return this,
@@ -628,14 +637,16 @@ int scan(const string &path, int fd, dev_t parent_dev, dir_time modified, dir_ti
 				// when recursing), but this is rare, and not really worth it --
 				// the second stat() will be cached anyway.
 				struct stat buf;
-				if (fstatat(fd, de->d_name, &buf, AT_SYMLINK_NOFOLLOW) == 0 &&
-				    S_ISDIR(buf.st_mode)) {
-					e.is_directory = true;
+				if (fstatat(fd, de->d_name, &buf, AT_SYMLINK_NOFOLLOW) == 0) {
+					e.is_directory = S_ISDIR(buf.st_mode);
+					e.is_symlink = S_ISLNK(buf.st_mode);
 				} else {
 					e.is_directory = false;
+					e.is_symlink = false;
 				}
 			} else {
 				e.is_directory = (de->d_type == DT_DIR);
+				e.is_symlink = (de->d_type == DT_LNK);
 			}
 
 			if (conf_verbose) {
@@ -673,7 +684,18 @@ int scan(const string &path, int fd, dev_t parent_dev, dir_time modified, dir_ti
 	// of subdirectories in a single directory); if so, the admin will need to raise the limit.
 	for (entry &e : entries) {
 		if (!e.is_directory) {
-			e.dt = not_a_dir;
+			// 非目录：dt.sec 存储秒级 mtime，nsec 不使用（设为 0）
+			struct stat buf;
+			if (fstatat(fd, e.name.c_str(), &buf, AT_SYMLINK_NOFOLLOW) == 0) {
+				e.size = buf.st_size;
+				e.dt.sec = buf.st_mtime;
+				e.dt.nsec = 0;
+				e.is_symlink = S_ISLNK(buf.st_mode);
+				e.is_hardlink = (buf.st_nlink > 1);
+				e.is_exec = (buf.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+			} else {
+				e.dt = not_a_dir;
+			}
 			continue;
 		}
 
@@ -732,12 +754,19 @@ int scan(const string &path, int fd, dev_t parent_dev, dir_time modified, dir_ti
 		}
 
 		e.dt = get_dirtime_from_stat(buf);
+		e.is_exec = (buf.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
 	}
 
 	// Actually add all the entries we figured out dates for above.
 	for (const entry &e : entries) {
-		corpus->add_file(path_plus_slash + e.name, e.dt);
-		dict_builder->add_file(path_plus_slash + e.name, e.dt);
+		FileEntry fe;
+		fe.filename = path_plus_slash + e.name;
+		fe.set_size(e.size, e.is_directory, e.is_symlink, e.is_hardlink, e.is_hidden, e.is_exec);
+		// 统一使用 dt.sec 作为秒级时间，dt.nsec 用于目录的增量更新
+		fe.mtime_sec = e.dt.sec;
+		fe.mtime_nsec = e.dt.nsec;
+		corpus->add_file(fe);
+		dict_builder->add_file(fe);
 	}
 
 	// Now scan subdirectories.
@@ -801,7 +830,7 @@ int main(int argc, char **argv)
 		owner = grp->gr_gid;
 	}
 
-	DatabaseBuilder db(conf_output.c_str(), owner, conf_block_size, existing_db.read_next_dictionary(), conf_check_visibility);
+	DatabaseBuilder db(conf_output.c_str(), owner, conf_block_size, existing_db.read_next_dictionary(), /*check_visibility=*/false);
 	db.set_conf_block(conf_block);
 	DatabaseReceiver *corpus = db.start_corpus(/*store_dir_times=*/true);
 

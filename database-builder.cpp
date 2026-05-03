@@ -108,13 +108,13 @@ void PostingListBuilder::write_header(uint32_t docid)
 	encoded.insert(encoded.end(), buf, end);
 }
 
-void DictionaryBuilder::add_file(string filename, dir_time)
+void DictionaryBuilder::add_file(const FileEntry& entry)
 {
 	if (keep_current_block) {  // Only bother saving the filenames if we're actually keeping the block.
 		if (!current_block.empty()) {
 			current_block.push_back('\0');
 		}
-		current_block += filename;
+		current_block += entry.filename;
 	}
 	if (++num_files_in_block == block_size) {
 		flush_block();
@@ -175,7 +175,7 @@ public:
 	EncodingCorpus(FILE *outfp, size_t block_size, ZSTD_CDict *cdict, bool store_dir_times);
 	~EncodingCorpus();
 
-	void add_file(std::string filename, dir_time dt) override;
+	void add_file(const FileEntry& entry) override;
 	void flush_block() override;
 	void finish() override;
 
@@ -236,27 +236,46 @@ EncodingCorpus::~EncodingCorpus()
 	for (unsigned i = 0; i < NUM_TRIGRAMS; ++i) {
 		delete invindex[i];
 	}
+	// 修复原版内存泄漏：释放 ZSTD_CStream 资源
+	if (dir_time_ctx != nullptr) {
+		ZSTD_freeCStream(dir_time_ctx);
+	}
 }
 
-void EncodingCorpus::add_file(string filename, dir_time dt)
+void EncodingCorpus::add_file(const FileEntry& entry)
 {
 	++num_files;
-	if (!current_block.empty()) {
-		current_block.push_back('\0');
+	// 新格式：8字节(size+flags) + 8字节(mtime) + 路径 + \0
+	// size 字段：高8位存储标志，低56位存储真实大小
+
+	// 写入 size (小端序 8字节) - 包含标志位
+	for (int i = 0; i < 8; ++i) {
+		current_block.push_back((entry.size >> (i * 8)) & 0xFF);
 	}
-	current_block += filename;
+
+	// 写入 mtime_sec (小端序 8字节)
+	for (int i = 0; i < 8; ++i) {
+		current_block.push_back((entry.mtime_sec >> (i * 8)) & 0xFF);
+	}
+
+	// 写入路径
+	current_block += entry.filename;
+	current_block.push_back('\0');  // 路径结束符
+
 	if (++num_files_in_block == block_size) {
 		flush_block();
 	}
 
+	// 存储目录时间用于增量更新
 	if (store_dir_times) {
-		if (dt.sec == -1) {
+		if (entry.is_directory()) {
+			// 是目录，存储修改时间（秒+纳秒）
+			dir_times.push_back('\1');
+			dir_times.append(reinterpret_cast<const char *>(&entry.mtime_sec), sizeof(entry.mtime_sec));
+			dir_times.append(reinterpret_cast<const char *>(&entry.mtime_nsec), sizeof(entry.mtime_nsec));
+		} else {
 			// Not a directory.
 			dir_times.push_back('\0');
-		} else {
-			dir_times.push_back('\1');
-			dir_times.append(reinterpret_cast<char *>(&dt.sec), sizeof(dt.sec));
-			dir_times.append(reinterpret_cast<char *>(&dt.nsec), sizeof(dt.nsec));
 		}
 		compress_dir_times(/*allowed_slop=*/4096);
 	}
@@ -305,35 +324,38 @@ void EncodingCorpus::flush_block()
 	// Create trigrams.
 	const char *ptr = current_block.c_str();
 	const char *end = ptr + current_block.size();
-	while (ptr < end - 3) {  // Must be at least one filename left, that's at least three bytes.
-		if (ptr[0] == '\0') {
-			// This filename is zero bytes, so skip it (and the zero terminator).
-			++ptr;
-			continue;
-		} else if (ptr[1] == '\0') {
-			// This filename is one byte, so skip it (and the zero terminator).
-			ptr += 2;
-			continue;
-		} else if (ptr[2] == '\0') {
-			// This filename is two bytes, so skip it (and the zero terminator).
-			ptr += 3;
-			continue;
-		}
-		for (;;) {
-			// NOTE: Will read one byte past the end of the trigram, but it's OK,
-			// since we always call it from contexts where there's a terminating zero byte.
+
+	// 新格式：8字节(size+flags) + 8字节(mtime) + 路径 + \0
+	// 至少需要 16 字节元数据 + 3 字节路径（生成 trigram）+ 1 字节 \0
+	while (ptr + 20 <= end) {
+		// 跳过 16 字节元数据（size+flags 和 mtime）
+		ptr += 16;
+
+		// 找到路径结束符
+		const char *path_start = ptr;
+		while (ptr < end && *ptr != '\0') ++ptr;
+		if (ptr >= end) break;
+
+		// 现在 path_start 指向路径，ptr 指向 \0
+		// 对路径生成 trigrams
+		const char *path_ptr = path_start;
+		const char *path_end = ptr;
+
+		// 路径必须至少3字节才能生成 trigram
+		while (path_ptr < path_end - 2) {  // 至少3字节
 			uint32_t trgm;
-			memcpy(&trgm, ptr, sizeof(trgm));
-			++ptr;
+			memcpy(&trgm, path_ptr, sizeof(trgm));
 			trgm = le32toh(trgm);
 			add_docid(trgm & 0xffffff, docid);
-			if (trgm <= 0xffffff) {
-				// Terminating zero byte, so we're done with this filename.
-				// Skip the remaining two bytes, and the zero terminator.
-				ptr += 3;
+			++path_ptr;
+			// 检查是否到达路径末尾（小端序，检查最高字节）
+			if ((trgm & 0xff000000) == 0) {
+				// 理论上不会发生，因为路径字符不会是 \0
 				break;
 			}
 		}
+
+		++ptr;  // 跳过 \0
 	}
 
 	// Compress and add the filename block.
@@ -385,7 +407,7 @@ string EncodingCorpus::get_compressed_dir_times()
 
 		int ret = ZSTD_endStream(dir_time_ctx, &outbuf);
 		if (ret < 0) {
-			fprintf(stderr, "ZSTD_compressStream() failed\n");
+			fprintf(stderr, "ZSTD_endStream() failed\n");
 			exit(1);
 		}
 
@@ -680,7 +702,7 @@ void DatabaseBuilder::finish_corpus()
 	}
 
 	// Rewind, and write the updated header.
-	hdr.version = 1;
+	hdr.version = 200;  // 新格式版本号，带文件元数据
 	fseek(outfp, 0, SEEK_SET);
 	fwrite(&hdr, sizeof(hdr), 1, outfp);
 

@@ -161,7 +161,7 @@ void Serializer::print(uint64_t seq, uint64_t skip, const string msg)
 	}
 
 	if (!msg.empty()) {
-		print_possibly_escaped(msg);
+		printf("%s%c", msg.c_str(), print_nul? 0 : '\n');
 		apply_limit();
 	}
 	next_seq += skip;
@@ -169,7 +169,7 @@ void Serializer::print(uint64_t seq, uint64_t skip, const string msg)
 	// See if any delayed prints can now be dealt with.
 	while (!pending.empty() && pending.top().seq == next_seq) {
 		if (!pending.top().msg.empty()) {
-			print_possibly_escaped(pending.top().msg);
+			printf("%s%c", pending.top().msg.c_str(), print_nul? 0 : '\n');
 			apply_limit();
 		}
 		next_seq += pending.top().skip;
