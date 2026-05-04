@@ -134,7 +134,7 @@ def parse_plocate_line(line: str) -> Optional[FileMeta]:
     解析 plocate 命令行输出的单行（元数据格式）。
 
     输入格式：
-        SIZE_ENCODED_HEX(16) + MTIME_HEX(16) + '|' + PATH
+        SIZE_ENCODED_HEX(16) + MTIME_HEX(16) + '|' + PATH + '\t' + BASENAME
     """
     if "|" not in line:
         # 纯路径格式（原版无元数据）
@@ -157,6 +157,11 @@ def parse_plocate_line(line: str) -> Optional[FileMeta]:
         return None
 
     path = urllib.parse.unquote("|".join(parts[1:]))
+
+    # 检测 patched 版 \t 分隔的 basename
+    tab_pos = path.rfind("\t")
+    if tab_pos != -1:
+        path = path[:tab_pos]
 
     meta_info = parse_size_encoded(size_encoded)
     return FileMeta(

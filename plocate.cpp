@@ -205,11 +205,14 @@ void scan_file_block(const vector<Needle> &needles, string_view compressed,
 		// 元数据已存储在数据库中，无需访问文件系统检查权限
 		++*matched;
 
-		// 新格式输出：SIZE_ENCODED_HEX(16) + MTIME_HEX(16)|PATH
+		// 新格式输出：SIZE_ENCODED_HEX(16) + MTIME_HEX(16)|PATH\tBASENAME
 		// SIZE_ENCODED 的高8位包含标志位，由 Python 端解析
+		// BASENAME 让 Python 端免去 os.path.basename() 调用
+		const char *basename = strrchr(filename, '/');
+		basename = basename ? basename + 1 : filename;
 		ostringstream oss;
 		oss << hex << setfill('0') << setw(16) << size
-		    << setw(16) << mtime << '|' << filename;
+		    << setw(16) << mtime << '|' << filename << '\t' << basename;
 		serializer->print(local_seq, next_seq - local_seq, oss.str());
 	};
 
